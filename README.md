@@ -40,7 +40,7 @@ Daily 건강관리(체중·혈압·혈당) 도메인을 기획부터 DB 설계, 
 - 아침/저녁 탭 전환 시 화면 전체 데이터가 해당 시간대 기록으로 바뀌는 구조
 - 해당 시간대에 기록이 없을 때만 입력폼 노출, 있으면 조회만
 - **SYS(수축기)·DIA(이완기)를 각각 판정한 뒤 더 위험한 쪽을 최종 상태로 표시** — 저혈압/정상/주의/경고/고혈압 5단계
-- 오늘 수치를 수축기·이완기 2축 좌표에 점으로 표시해, 위험 구간(저혈압·정상·주의·위험)에서의 위치를 시각적으로 보여주는 산점도 차트도 함께 구현
+- 오늘 수치를 수축기·이완기 2축 좌표에 점으로 표시해, 위험 구간(저혈압·정상·주의·위험)에서의 위치를 시각적으로 보여주는 산점도 차트
 - 건너뛰기로 들어온 경우 "현재 시간대" 탭을, 입력을 완료한 경우 "입력한 시간대" 탭을 보여주도록 구분 (점심시간에 아침 기록을 입력해도 아침 탭 유지)
 
 <img src="./assets/bp-scatter.png" width="260" alt="혈압 수축기·이완기 산점도" /> <img src="./assets/bp-input.png" width="260" alt="혈압 Bottom Sheet 입력" />
@@ -55,32 +55,13 @@ Daily 건강관리(체중·혈압·혈당) 도메인을 기획부터 DB 설계, 
 - Prisma 복합 유니크(`userId · bgDate · mealType · mealTiming`)로 동일 조건 중복 등록을 DB 레벨에서 차단
 - 조회 시 백엔드에서 식전·식후 레코드를 날짜별로 묶어(`groupByDate`) 하나의 응답으로 반환
 
-**달력 표현의 문제**: 혈압은 "더 위험한 쪽"으로 합쳐서 하나의 색으로 표시할 수 있었지만, 혈당은 식전 저혈당 + 식후 고혈당이 **동시에** 나올 수 있어 그 방식이 통하지 않았습니다. 그래서 달력 한 칸을 반원으로 나눠 **왼쪽은 식전, 오른쪽은 식후** 상태를 각각 다른 색으로 동시에 표현하는 방식으로 설계했습니다.
+**달력 표현의 문제**: 혈압은 "더 위험한 쪽"으로 합쳐서 하나의 색으로 표시할 수 있었지만, 혈당은 식전 저혈당 + 식후 고혈당이 동시에 나올 수 있어 다른방법을 사용했습니다.
+달력 한 칸을 반원으로 나눠 **왼쪽은 식전, 오른쪽은 식후** 상태를 각각 다른 색으로 동시에 표현하는 방식으로 설계했습니다.
 
 <img src="./assets/glucose-calendar.png" width="320" alt="혈당 반원 달력" />
 
 반원은 식전·식후가 **서로 다른 이상 상태(저혈당·주의·고혈당·위험)로 겹칠 때만** 표시됩니다. 정상은 그 자체로 "볼 필요 없는 상태"라 반원에 넣지 않았고, 정상과 이상 상태가 겹치면 그냥 이상 상태 단색으로 표시했습니다. 하루에 확인해야 할 이상 신호만 남기기 위한 선택이었습니다.
 
-<img src="./assets/glucose-combo-examples.png" width="560" alt="혈당 반원 이상상태 조합 예시" />
-
-```ts
-// blood-glucose.service.ts — 식전/식후를 날짜별로 그룹화
-private groupByDate(records: { glucose: number; mealTiming: mealtiming; bgDate: Date }[]) {
-  const grouped = new Map<string, { bgDate: Date; before: number | null; after: number | null }>();
-  for (const record of records) {
-    const dateKey = record.bgDate.toISOString().slice(0, 10);
-    if (!grouped.has(dateKey)) {
-      grouped.set(dateKey, { bgDate: record.bgDate, before: null, after: null });
-    }
-    const daily = grouped.get(dateKey)!;
-    if (record.mealTiming === mealtiming.BEFORE) daily.before = record.glucose;
-    else daily.after = record.glucose;
-  }
-  return [...grouped.values()];
-}
-```
-
----
 
 ## 🔧 문제 해결 — 커밋에 남은 세 번의 재설계
 
@@ -88,44 +69,11 @@ private groupByDate(records: { glucose: number; mealTiming: mealtiming; bgDate: 
 
 처음엔 체중 입력 시 키를 선택적으로 함께 받아 BMI를 계산했습니다. 그런데 **키를 입력한 경우 / 안 한 경우 / 나중에 추가한 경우 / 나중에 변경한 경우**, 그리고 이전 BMI를 어떻게 처리할지까지 분기가 계속 늘어났습니다.
 
-```diff
-- const heightSave = height ?? profile.height;
-- let bmi: number | null = null;
-- if (heightSave != null) {
--   const heightMeter = heightSave / 100;
--   bmi = Number((weight / (heightMeter * heightMeter)).toFixed(1));
-- }
-+ if (profile.height == null || profile.height <= 0) {
-+   throw new BadRequestException("BMI 계산에 필요한 키 정보가 없어요.");
-+ }
-+ const heightMeter = profile.height / 100;
-+ const bmi = Number((weight / (heightMeter * heightMeter)).toFixed(1));
-```
-
 키는 프로필에서 한 번만 관리하도록 통일하고, 체중 등록 API의 DTO에서 `height` 필드 자체를 제거했습니다. 분기를 하나씩 처리하기보다, **분기가 생기는 원인(키를 여러 곳에서 받는 구조) 자체를 없애는 방향**으로 풀었습니다.
 
 ### ② 목표체중 판정 — 매번 계산하다가, 방향이 바뀔 때만 재계산
 
 감량을 목표로 한 사용자가 목표보다 더 감량하면(예: 목표 60kg인데 59kg 도달) 단순 차이 계산 로직에서는 오히려 "1kg 증량하세요"로 안내되는 문제가 있었습니다.
-
-```diff
-- if (goalWeight != null) {
--   goalWeightState = this.getGoalWeightState(weight, goalWeight);
-- }
-- else if (profile.goalWeight != null && profile.goalWeightState == null) {
--   goalWeightState = this.getGoalWeightState(weight, profile.goalWeight);
-- }
-+ if (goalWeightSave != null) {
-+   if (!goalWeightState) {
-+     goalWeightState = this.getGoalWeightState(weight, goalWeightSave);
-+   } else if (
-+     (goalWeightState === "+" && weight >= goalWeightSave) ||
-+     (goalWeightState === "-" && weight <= goalWeightSave)
-+   ) {
-+     goalWeightState = "0"; // 목표 달성 → 유지 상태로 고정
-+   }
-+ }
-```
 
 목표 설정 시 감량(`-`)/증량(`+`)/유지(`0`) 상태를 DB에 저장해두고, **새로운 목표체중을 입력할 때만 재계산**하도록 분리했습니다. 목표체중 입력도 최초 1회만 체중 입력폼과 함께 받고, 이후에는 메인 화면에서 `PATCH /weight/profile`로 독립적으로 수정할 수 있게 바꿔서 "매번 목표를 다시 입력하는" 번거로움도 함께 없앴습니다.
 
@@ -168,16 +116,3 @@ private groupByDate(records: { glucose: number; mealTiming: mealtiming; bgDate: 
 ## 👥 팀 프로젝트 전체 개요 (참고)
 
 Daily 건강관리 외의 기능(건강검진 업로드·AI 분석, 식단 관리, 마이페이지 등)은 팀원들이 담당했습니다. 전체 기능 소개는 [원본 팀 저장소 README](https://github.com/Jeon-Dabeen/LinkCare)를 참고해 주세요.
-
-## 🚀 실행 방법
-
-```bash
-pnpm install
-
-# apps/api/.env
-DATABASE_URL="postgresql://USER:PASSWORD@localhost:5432/linkcare"
-JWT_SECRET="..."
-
-pnpm --filter api exec prisma migrate dev
-pnpm dev
-```
